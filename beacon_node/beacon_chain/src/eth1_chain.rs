@@ -2,7 +2,6 @@ use crate::metrics;
 use eth1::{Config as Eth1Config, Eth1Block, Service as HttpService};
 use eth2_hashing::hash;
 use exit_future::Exit;
-use futures::Future;
 use slog::{debug, error, trace, Logger};
 use ssz_derive::{Decode, Encode};
 use state_processing::per_block_processing::get_new_eth1_data;
@@ -259,8 +258,8 @@ impl<T: EthSpec, S: Store<T>> CachingEth1Backend<T, S> {
     }
 
     /// Starts the routine which connects to the external eth1 node and updates the caches.
-    pub fn start(&self, exit: Exit) -> impl Future<Item = (), Error = ()> {
-        self.core.auto_update(exit)
+    pub async fn start(&self, exit: Exit) -> Result<(), ()> {
+        self.core.auto_update(exit).await
     }
 
     /// Instantiates `self` from an existing service.
