@@ -2,6 +2,7 @@ use clap::ArgMatches;
 use environment::Environment;
 use eth1_test_rig::DepositContract;
 use eth2_testnet_config::Eth2TestnetConfig;
+use futures::compat::Future01CompatExt;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
@@ -10,7 +11,10 @@ use web3::{transports::Http, Web3};
 
 pub const SECONDS_PER_ETH1_BLOCK: u64 = 15;
 
-pub fn run<T: EthSpec>(mut env: Environment<T>, matches: &ArgMatches) -> Result<(), String> {
+pub async fn run<T: EthSpec>(
+    mut env: Environment<T>,
+    matches: &ArgMatches<'_>,
+) -> Result<(), String> {
     let min_genesis_time = matches
         .value_of("min-genesis-time")
         .ok_or_else(|| "min_genesis_time not specified")?
@@ -62,9 +66,11 @@ pub fn run<T: EthSpec>(mut env: Environment<T>, matches: &ArgMatches) -> Result<
     //
     // We only need the deposit block to put a lower bound on the block number we need to search
     // for deposit logs.
-    let deploy_block = env
-        .runtime()
-        .block_on(web3.eth().block_number())
+    let deploy_block = web3
+        .eth()
+        .block_number()
+        .compat()
+        .await
         .map_err(|e| format!("Failed to get block number: {}", e))?;
 
     info!("Present eth1 block number is {}", deploy_block);
@@ -76,13 +82,8 @@ pub fn run<T: EthSpec>(mut env: Environment<T>, matches: &ArgMatches) -> Result<
         confirmations
     );
 
-    let deposit_contract = env
-        .runtime()
-        .block_on(DepositContract::deploy_testnet(
-            web3,
-            confirmations,
-            password,
-        ))
+    let deposit_contract = DepositContract::deploy_testnet(web3, confirmations, password)
+        .await
         .map_err(|e| format!("Failed to deploy contract: {}", e))?;
 
     info!(
