@@ -20,11 +20,12 @@ use types::test_utils::{SeedableRng, XorShiftRng};
 use types::*;
 
 // Should ideally be divisible by 3.
-pub const VALIDATOR_COUNT: usize = 24;
+pub const LOW_VALIDATOR_COUNT: usize = 24;
+pub const HIGH_VALIDATOR_COUNT: usize = 256;
 
 lazy_static! {
     /// A cached set of keys.
-    static ref KEYPAIRS: Vec<Keypair> = types::test_utils::generate_deterministic_keypairs(VALIDATOR_COUNT);
+    static ref KEYPAIRS: Vec<Keypair> = types::test_utils::generate_deterministic_keypairs(HIGH_VALIDATOR_COUNT);
 }
 
 type E = MinimalEthSpec;
@@ -57,7 +58,7 @@ fn full_participation_no_skips() {
     let num_blocks_produced = E::slots_per_epoch() * 5;
     let db_path = tempdir().unwrap();
     let store = get_store(&db_path);
-    let harness = get_harness(store.clone(), VALIDATOR_COUNT);
+    let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
 
     harness.extend_chain(
         num_blocks_produced as usize,
@@ -77,7 +78,7 @@ fn randomised_skips() {
     let mut num_blocks_produced = 0;
     let db_path = tempdir().unwrap();
     let store = get_store(&db_path);
-    let harness = get_harness(store.clone(), VALIDATOR_COUNT);
+    let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
     let rng = &mut XorShiftRng::from_seed([42; 16]);
 
     let mut head_slot = 0;
@@ -113,7 +114,7 @@ fn randomised_skips() {
 fn long_skip() {
     let db_path = tempdir().unwrap();
     let store = get_store(&db_path);
-    let harness = get_harness(store.clone(), VALIDATOR_COUNT);
+    let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
 
     // Number of blocks to create in the first run, intentionally not falling on an epoch
     // boundary in order to check that the DB hot -> cold migration is capable of reaching
@@ -223,7 +224,7 @@ fn split_slot_restore() {
 
     let split_slot = {
         let store = get_store(&db_path);
-        let harness = get_harness(store.clone(), VALIDATOR_COUNT);
+        let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
 
         let num_blocks = 4 * E::slots_per_epoch();
 
@@ -251,10 +252,10 @@ fn epoch_boundary_state_attestation_processing() {
     let num_blocks_produced = E::slots_per_epoch() * 5;
     let db_path = tempdir().unwrap();
     let store = get_store(&db_path);
-    let harness = get_harness(store.clone(), VALIDATOR_COUNT);
+    let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
 
     let late_validators = vec![0, 1];
-    let timely_validators = (2..VALIDATOR_COUNT).collect::<Vec<_>>();
+    let timely_validators = (2..LOW_VALIDATOR_COUNT).collect::<Vec<_>>();
 
     let mut late_attestations = vec![];
 
@@ -333,7 +334,7 @@ fn epoch_boundary_state_attestation_processing() {
 fn delete_blocks_and_states() {
     let db_path = tempdir().unwrap();
     let store = get_store(&db_path);
-    let harness = get_harness(store.clone(), VALIDATOR_COUNT);
+    let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
 
     let unforked_blocks = 4 * E::slots_per_epoch();
 
@@ -345,9 +346,9 @@ fn delete_blocks_and_states() {
     );
 
     // Create a fork post-finalization.
-    let two_thirds = (VALIDATOR_COUNT / 3) * 2;
+    let two_thirds = (LOW_VALIDATOR_COUNT / 3) * 2;
     let honest_validators: Vec<usize> = (0..two_thirds).collect();
-    let faulty_validators: Vec<usize> = (two_thirds..VALIDATOR_COUNT).collect();
+    let faulty_validators: Vec<usize> = (two_thirds..LOW_VALIDATOR_COUNT).collect();
 
     let fork_blocks = 2 * E::slots_per_epoch();
 
@@ -433,7 +434,7 @@ fn multi_epoch_fork_valid_blocks_test(
 ) {
     let db_path = tempdir().unwrap();
     let store = get_store(&db_path);
-    let harness = get_harness(store.clone(), VALIDATOR_COUNT);
+    let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
 
     // Create the initial portion of the chain
     if initial_blocks > 0 {
@@ -444,9 +445,9 @@ fn multi_epoch_fork_valid_blocks_test(
         );
     }
 
-    assert!(num_fork1_validators <= VALIDATOR_COUNT);
+    assert!(num_fork1_validators <= LOW_VALIDATOR_COUNT);
     let fork1_validators: Vec<usize> = (0..num_fork1_validators).collect();
-    let fork2_validators: Vec<usize> = (num_fork1_validators..VALIDATOR_COUNT).collect();
+    let fork2_validators: Vec<usize> = (num_fork1_validators..LOW_VALIDATOR_COUNT).collect();
 
     harness.generate_two_forks_by_skipping_a_block(
         &fork1_validators,
@@ -464,7 +465,7 @@ fn block_production_different_shuffling_early() {
         slots_per_epoch - 2,
         slots_per_epoch + 3,
         slots_per_epoch + 3,
-        VALIDATOR_COUNT / 2,
+        LOW_VALIDATOR_COUNT / 2,
     );
 }
 
@@ -475,8 +476,37 @@ fn block_production_different_shuffling_long() {
         2 * slots_per_epoch - 2,
         3 * slots_per_epoch,
         3 * slots_per_epoch,
-        VALIDATOR_COUNT / 2,
+        LOW_VALIDATOR_COUNT / 2,
     );
+}
+
+// Check that the op pool safely includes multiple attestations per block when necessary.
+#[test]
+fn multiple_attestations_per_block() {
+    let db_path = tempdir().unwrap();
+    let store = get_store(&db_path);
+    let harness = get_harness(store, HIGH_VALIDATOR_COUNT);
+    let chain = &harness.chain;
+
+    harness.extend_chain(
+        MainnetEthSpec::slots_per_epoch() as usize * 3,
+        BlockStrategy::OnCanonicalHead,
+        AttestationStrategy::AllValidators,
+    );
+
+    let head = chain.head().unwrap();
+    let committees_per_slot = head
+        .beacon_state
+        .get_committee_count_at_slot(head.beacon_state.slot)
+        .unwrap();
+    assert!(committees_per_slot > 1, "{}", committees_per_slot);
+
+    for snapshot in chain.chain_dump().unwrap() {
+        assert_eq!(
+            snapshot.beacon_block.message.body.attestations.len() as u64,
+            committees_per_slot
+        );
+    }
 }
 
 /// Check that the head state's slot matches `expected_slot`.

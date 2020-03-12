@@ -24,6 +24,7 @@ use state_processing::{
 };
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fs;
 use std::io::prelude::*;
 use std::sync::Arc;
@@ -1089,7 +1090,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// Specifically, check that the attestation's head block comes from a chain that shares the
     /// same shuffling as the given `state` at the attestation's slot.
     // FIXME(sproul): use block root argument
-    fn attestation_shuffling_is_compatible(
+    pub fn attestation_shuffling_is_compatible(
         &self,
         attestation: &Attestation<T::EthSpec>,
         state: &BeaconState<T::EthSpec>,
@@ -1603,6 +1604,15 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .deposits_for_block_inclusion(&state, &eth1_data, &self.spec)?
             .into();
 
+        // Map from attestation head block root to shuffling compatibility.
+        // Used to memoize the `attestation_shuffling_is_compatible` function.
+        let mut shuffling_filter_cache = HashMap::new();
+        let attestation_filter = |att: &&Attestation<T::EthSpec>| -> bool {
+            *shuffling_filter_cache
+                .entry(att.data.beacon_block_root)
+                .or_insert_with(|| self.attestation_shuffling_is_compatible(att, &state))
+        };
+
         let mut block = SignedBeaconBlock {
             message: BeaconBlock {
                 slot: state.slot,
@@ -1616,11 +1626,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     attester_slashings: attester_slashings.into(),
                     attestations: self
                         .op_pool
-                        .get_attestations(
-                            &state,
-                            |att| self.attestation_shuffling_is_compatible(att, &state),
-                            &self.spec,
-                        )
+                        .get_attestations(&state, attestation_filter, &self.spec)
                         .map_err(BlockProductionError::OpPoolError)?
                         .into(),
                     deposits,
