@@ -21,7 +21,7 @@ use types::*;
 
 // Should ideally be divisible by 3.
 pub const LOW_VALIDATOR_COUNT: usize = 24;
-pub const HIGH_VALIDATOR_COUNT: usize = 256;
+pub const HIGH_VALIDATOR_COUNT: usize = 64;
 
 lazy_static! {
     /// A cached set of keys.
@@ -121,7 +121,9 @@ fn long_skip() {
     // back across the skip distance, and correctly migrating those extra non-finalized states.
     let initial_blocks = E::slots_per_epoch() * 5 + E::slots_per_epoch() / 2;
     let skip_slots = E::slots_per_historical_root() as u64 * 8;
-    let final_blocks = E::slots_per_epoch() * 4;
+    // Create the minimum ~2.5 epochs of extra blocks required to re-finalize the chain.
+    // Having this set lower ensures that we start justifying and finalizing quickly after a skip.
+    let final_blocks = 2 * E::slots_per_epoch() + E::slots_per_epoch() / 2;
 
     harness.extend_chain(
         initial_blocks as usize,
@@ -481,6 +483,7 @@ fn block_production_different_shuffling_long() {
 }
 
 // Check that the op pool safely includes multiple attestations per block when necessary.
+// This checks the correctness of the shuffling compatibility memoization.
 #[test]
 fn multiple_attestations_per_block() {
     let db_path = tempdir().unwrap();
@@ -499,13 +502,52 @@ fn multiple_attestations_per_block() {
         .beacon_state
         .get_committee_count_at_slot(head.beacon_state.slot)
         .unwrap();
-    assert!(committees_per_slot > 1, "{}", committees_per_slot);
+    assert!(committees_per_slot > 1);
 
     for snapshot in chain.chain_dump().unwrap() {
         assert_eq!(
             snapshot.beacon_block.message.body.attestations.len() as u64,
-            committees_per_slot
+            if snapshot.beacon_block.slot() <= 1 {
+                0
+            } else {
+                committees_per_slot
+            }
         );
+    }
+}
+
+#[test]
+fn shuffling_compatible_missing_pivot_block() {
+    let db_path = tempdir().unwrap();
+    let store = get_store(&db_path);
+    let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
+
+    // Skip the block at the end of the first epoch.
+    harness.extend_chain(
+        E::slots_per_epoch() - 2,
+        BlockStrategy::OnCanonicalHead,
+        AttestationStrategy::AllValidators,
+    );
+    harness.advance_slot();
+    let head_block_root = harness.extend_chain(
+        2 * E::slots_per_epoch(),
+        BlockStrategy::OnCanonicalHead,
+        AttestationStrategy::AllValidators,
+    );
+
+    let head_state = harness.chain.head().beacon_state;
+    let head_epoch = head_state.slot.epoch(E::slots_per_epoch());
+
+    for (block_root, slot) in harness.chain.rev_iter_block_roots(head_block_root).unwrap() {
+        let block_epoch = slot.epoch(E::slots_per_epoch);
+        if block_epoch == head_epoch || block_epoch == head_epoch - 1 {
+            assert!(harness
+                .chain
+                .shuffling_is_compatible(block_root, head_epoch, &head_state));
+            assert!(harness
+                .chain
+                .shuffling_is_compatible(block_root, head_epoch - 1, &head_state));
+        }
     }
 }
 
